@@ -3,7 +3,6 @@
 """
 华住会自动签到脚本
 支持: GitHub Actions / 青龙面板 / 本地运行
-Author: Auto Generated
 Cron: 0 8 * * *  (每天早上8点执行)
 
 环境变量:
@@ -11,13 +10,14 @@ Cron: 0 8 * * *  (每天早上8点执行)
   PUSH_KEY:      Server酱推送Key (可选)
   TG_BOT_TOKEN:  Telegram Bot Token (可选)
   TG_CHAT_ID:    Telegram Chat ID (可选)
+  BARK_KEY:      Bark推送Key (可选)
+  PUSHPLUS_TOKEN: PushPlus推送Token (可选)
 
 获取Cookie方法:
-  1. 微信打开华住会小程序
-  2. 进入 "会员" -> "签到" 页面
-  3. 使用抓包工具 (Charles/Fiddler) 抓取请求
-  4. 找到 hweb-minilogin.huazhu.com 相关请求的 Cookie
-  5. 或者抓取完整的签到请求URL中的参数
+  1. 使用抓包工具(Charles/Fiddler/Stream)
+  2. 打开微信 -> 华住会小程序 -> 会员 -> 签到
+  3. 抓取 appgw.huazhu.com 域名请求中的 Cookie
+  4. 关键字段: userToken=xxx (必须包含)
 """
 
 import os
@@ -25,10 +25,9 @@ import sys
 import json
 import time
 import random
-import hashlib
 import logging
 from datetime import datetime
-from urllib.parse import urlencode, quote
+from urllib.parse import quote
 
 try:
     import requests
@@ -48,26 +47,32 @@ logging.basicConfig(
 logger = logging.getLogger("huazhu")
 
 # ============================================================
-# 全局配置
+# 真实API地址 (从抓包分析得到)
 # ============================================================
-BASE_URL = "https://hweb-minilogin.huazhu.com"
-SIGN_URL = f"{BASE_URL}/api/sign/signIn"
-SIGN_INFO_URL = f"{BASE_URL}/api/sign/getSignInfo"
-USER_INFO_URL = f"{BASE_URL}/api/member/getMemberInfo"
+BASE_URL = "https://appgw.huazhu.com"
+SIGN_IN_URL = f"{BASE_URL}/game/sign_in"           # GET, 签到
+SIGN_HEADER_URL = f"{BASE_URL}/game/sign_header"    # GET, 签到状态/头部信息
+SIGN_NOTICE_CLOSE_URL = f"{BASE_URL}/game/sign_notice_close"  # GET, 关闭签到提醒
+PLAY_ENTRY_URL = f"{BASE_URL}/game/play_entry"      # GET, 活动入口
+
+# 认证跳转 (用于刷新 userToken)
+BRIDGE_URL = "https://hweb-minilogin.huazhu.com/bridge/jump"
 
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 "
-                  "MicroMessenger/8.0.44.2540(0x28002C37) Process/appbrand0 "
-                  "WeChat/arm64 Weixin NetType/WIFI Language/zh_CN ABI/arm64 "
-                  "MiniProgramEnv/android",
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
+                  "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+                  "MicroMessenger/8.0.69(0x18004532) NetType/WIFI Language/zh_CN "
+                  "miniProgram/wx286efc12868f2559",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Accept-Language": "zh-CN,zh-Hans;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
-    "Content-Type": "application/json",
-    "Origin": "https://hweb-minilogin.huazhu.com",
-    "Referer": "https://hweb-minilogin.huazhu.com/",
+    "Origin": "https://cdn.huazhu.com",
+    "Referer": "https://cdn.huazhu.com/",
+    "Client-Platform": "WX-MP",
     "Connection": "keep-alive",
+    "Sec-Fetch-Site": "same-site",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
 }
 
 # 消息收集
@@ -94,8 +99,6 @@ def send_notify(title, content):
             resp = requests.post(url, data=data, timeout=10)
             if resp.status_code == 200:
                 logger.info("Server酱推送成功")
-            else:
-                logger.warning(f"Server酱推送失败: {resp.status_code}")
         except Exception as e:
             logger.warning(f"Server酱推送异常: {e}")
 
@@ -105,26 +108,19 @@ def send_notify(title, content):
     if tg_token and tg_chat_id:
         try:
             url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
-            data = {"chat_id": tg_chat_id, "text": f"{title}\n\n{content}", "parse_mode": "HTML"}
+            data = {"chat_id": tg_chat_id, "text": f"{title}\n\n{content}"}
             resp = requests.post(url, json=data, timeout=10)
             if resp.status_code == 200:
                 logger.info("Telegram推送成功")
-            else:
-                logger.warning(f"Telegram推送失败: {resp.status_code}")
         except Exception as e:
             logger.warning(f"Telegram推送异常: {e}")
-
-    # 青龙面板内置通知 (通过环境变量 QLAPI)
-    # 青龙面板通常会自动捕获print输出作为日志
 
     # Bark推送
     bark_key = os.environ.get("BARK_KEY", "")
     if bark_key:
         try:
             url = f"https://api.day.app/{bark_key}/{quote(title)}/{quote(content)}"
-            resp = requests.get(url, timeout=10)
-            if resp.status_code == 200:
-                logger.info("Bark推送成功")
+            requests.get(url, timeout=10)
         except Exception as e:
             logger.warning(f"Bark推送异常: {e}")
 
@@ -134,9 +130,7 @@ def send_notify(title, content):
         try:
             url = "https://www.pushplus.plus/send"
             data = {"token": pushplus_token, "title": title, "content": content}
-            resp = requests.post(url, json=data, timeout=10)
-            if resp.status_code == 200:
-                logger.info("PushPlus推送成功")
+            requests.post(url, json=data, timeout=10)
         except Exception as e:
             logger.warning(f"PushPlus推送异常: {e}")
 
@@ -152,18 +146,15 @@ class HuazhuCheckin:
         self.session = requests.Session()
         self.session.headers.update(DEFAULT_HEADERS)
         self.session.headers["Cookie"] = self.cookie
-        self.nickname = "未知用户"
-        self.member_level = ""
-        self.points = 0
 
     def _request(self, method, url, **kwargs):
-        """封装请求，增加重试和错误处理"""
+        """封装请求，增加重试"""
         kwargs.setdefault("timeout", 30)
         for attempt in range(3):
             try:
                 resp = self.session.request(method, url, **kwargs)
-                resp.raise_for_status()
-                return resp.json()
+                # 不直接 raise_for_status, 让调用者处理
+                return resp
             except requests.exceptions.RequestException as e:
                 logger.warning(f"请求失败 (尝试 {attempt + 1}/3): {e}")
                 if attempt < 2:
@@ -172,75 +163,58 @@ class HuazhuCheckin:
                     raise
         return None
 
-    def get_user_info(self):
-        """获取用户信息"""
+    def get_sign_header(self):
+        """获取签到头部信息 (签到状态)"""
         try:
-            data = self._request("GET", USER_INFO_URL)
-            if data and data.get("code") == 0:
-                info = data.get("data", {})
-                self.nickname = info.get("nickname", info.get("memberName", "未知用户"))
-                self.member_level = info.get("levelName", "")
-                self.points = info.get("totalPoints", info.get("points", 0))
-                log_and_notify(f"👤 用户: {self.nickname} | 等级: {self.member_level} | 积分: {self.points}")
-                return True
-            else:
-                msg = data.get("msg", "未知错误") if data else "请求失败"
-                log_and_notify(f"❌ 获取用户信息失败: {msg}")
-                return False
-        except Exception as e:
-            log_and_notify(f"❌ 获取用户信息异常: {e}")
-            return False
-
-    def get_sign_info(self):
-        """获取签到状态"""
-        try:
-            data = self._request("GET", SIGN_INFO_URL)
-            if data and data.get("code") == 0:
-                info = data.get("data", {})
-                is_signed = info.get("isTodaySigned", info.get("isSign", False))
-                sign_days = info.get("continueDays", info.get("signDays", 0))
-                if is_signed:
-                    log_and_notify(f"📋 今日已签到 | 连续签到: {sign_days}天")
+            resp = self._request("GET", SIGN_HEADER_URL)
+            data = resp.json()
+            code = data.get("code", data.get("businessCode", ""))
+            if str(code) == "200" or str(data.get("businessCode", "")) == "1000":
+                content = data.get("content", {})
+                if isinstance(content, dict):
+                    sign_days = content.get("signDays", content.get("continueDays", "?"))
+                    is_signed = content.get("isTodaySigned", content.get("isSign", False))
+                    points = content.get("points", content.get("totalPoints", "?"))
+                    log_and_notify(f"📋 签到状态: {'已签到' if is_signed else '未签到'} | 连签: {sign_days}天 | 积分: {points}")
+                    return {"is_signed": is_signed, "sign_days": sign_days}
                 else:
-                    log_and_notify(f"📋 今日未签到 | 连续签到: {sign_days}天")
-                return {"is_signed": is_signed, "sign_days": sign_days}
+                    log_and_notify(f"📋 签到头信息: {data}")
+                    return {"is_signed": False}
             else:
-                msg = data.get("msg", "未知错误") if data else "请求失败"
-                log_and_notify(f"⚠️ 获取签到信息失败: {msg}")
+                log_and_notify(f"⚠️ 获取签到状态失败: {data.get('message', data)}")
                 return None
         except Exception as e:
-            log_and_notify(f"⚠️ 获取签到信息异常: {e}")
+            log_and_notify(f"⚠️ 获取签到状态异常: {e}")
             return None
 
     def do_checkin(self):
-        """执行签到"""
+        """执行签到 - GET /game/sign_in?date={timestamp}"""
         try:
-            # 构造签到请求体
-            timestamp = int(time.time() * 1000)
-            payload = {
-                "timestamp": timestamp,
-            }
+            timestamp = int(time.time())
+            params = {"date": str(timestamp)}
 
-            data = self._request("POST", SIGN_URL, json=payload)
-
-            if data is None:
-                log_and_notify("❌ 签到请求失败，无响应")
-                return False
+            resp = self._request("GET", SIGN_IN_URL, params=params)
+            data = resp.json()
 
             code = data.get("code", -1)
-            msg = data.get("msg", data.get("message", "未知"))
+            biz_code = data.get("businessCode", "")
+            msg = data.get("message", data.get("responseDes", ""))
+            content = data.get("content", {})
 
-            if code == 0:
-                result = data.get("data", {})
-                points_earned = result.get("points", result.get("rewardPoints", "未知"))
-                sign_days = result.get("continueDays", result.get("signDays", ""))
-                log_and_notify(f"✅ 签到成功! 获得 {points_earned} 积分 | 连续签到: {sign_days}天")
+            if str(code) == "200" or str(biz_code) == "1000":
+                if isinstance(content, dict):
+                    points_earned = content.get("points", content.get("rewardPoints", ""))
+                    sign_days = content.get("continueDays", content.get("signDays", ""))
+                    log_and_notify(f"✅ 签到成功! 获得 {points_earned} 积分 | 连签: {sign_days}天")
+                else:
+                    log_and_notify(f"✅ 签到成功! 返回: {content}")
                 return True
-            elif "已签到" in str(msg) or "already" in str(msg).lower():
+            elif "已签" in str(msg) or "already" in str(msg).lower() or "signed" in str(msg).lower():
                 log_and_notify(f"📌 今日已签到，无需重复签到")
                 return True
             else:
-                log_and_notify(f"❌ 签到失败: [{code}] {msg}")
+                log_and_notify(f"❌ 签到失败: code={code}, biz={biz_code}, msg={msg}")
+                log_and_notify(f"   完整响应: {json.dumps(data, ensure_ascii=False)[:300]}")
                 return False
 
         except Exception as e:
@@ -252,18 +226,17 @@ class HuazhuCheckin:
         log_and_notify(f"{'='*40}")
         log_and_notify(f"🏨 华住会自动签到")
         log_and_notify(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # 提取 userToken 用于日志展示
+        token_part = ""
+        if "userToken=" in self.cookie:
+            token_val = self.cookie.split("userToken=")[1].split(";")[0]
+            token_part = token_val[:8] + "***" + token_val[-4:]
+        log_and_notify(f"🔑 Token: {token_part}")
         log_and_notify(f"{'='*40}")
 
-        # 1. 获取用户信息
-        self.get_user_info()
-
-        # 随机延迟，模拟人工操作
-        delay = random.uniform(1, 3)
-        logger.info(f"等待 {delay:.1f} 秒...")
-        time.sleep(delay)
-
-        # 2. 获取签到状态
-        sign_info = self.get_sign_info()
+        # 1. 获取签到状态
+        sign_info = self.get_sign_header()
 
         # 如果已签到则跳过
         if sign_info and sign_info.get("is_signed"):
@@ -274,15 +247,15 @@ class HuazhuCheckin:
         delay = random.uniform(1, 3)
         time.sleep(delay)
 
-        # 3. 执行签到
+        # 2. 执行签到
         result = self.do_checkin()
 
-        # 4. 签到后再次获取信息确认
+        # 3. 签到后再查一次状态确认
         if result:
             time.sleep(random.uniform(1, 2))
-            self.get_sign_info()
+            self.get_sign_header()
 
-        log_and_notify(f"{'='*40}\n")
+        log_and_notify("")
         return result
 
 
@@ -303,6 +276,7 @@ def main():
     if not cookie_str:
         log_and_notify("❌ 未配置 HUAZHU_COOKIE 环境变量!")
         log_and_notify("请设置环境变量 HUAZHU_COOKIE 为华住会的Cookie")
+        log_and_notify("Cookie 必须包含 userToken 字段")
         log_and_notify("多账号请用 & 或换行符分隔")
         send_notify("华住会签到失败", "\n".join(notify_messages))
         sys.exit(1)
@@ -317,6 +291,13 @@ def main():
 
     for idx, cookie in enumerate(cookies, 1):
         log_and_notify(f"🔄 开始处理第 {idx}/{len(cookies)} 个账号")
+
+        # 检查 cookie 中是否包含 userToken
+        if "userToken=" not in cookie:
+            log_and_notify(f"⚠️ 第 {idx} 个账号的Cookie中未找到 userToken，请检查")
+            fail_count += 1
+            continue
+
         try:
             checkin = HuazhuCheckin(cookie)
             result = checkin.run()
@@ -334,7 +315,7 @@ def main():
             logger.info(f"账号间等待 {delay:.1f} 秒...")
             time.sleep(delay)
 
-    # 汇总结果
+    # 汇总
     log_and_notify(f"\n{'='*40}")
     log_and_notify(f"📊 签到汇总: 成功 {success_count} | 失败 {fail_count} | 总计 {len(cookies)}")
     log_and_notify(f"{'='*40}")
