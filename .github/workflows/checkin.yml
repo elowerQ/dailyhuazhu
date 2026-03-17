@@ -1,0 +1,36 @@
+name: 华住会自动签到
+
+on:
+  # 每天北京时间 8:05 执行 (UTC 0:05)
+  schedule:
+    - cron: '5 0 * * *'
+  # 允许手动触发
+  workflow_dispatch:
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    name: 华住会签到
+
+    steps:
+      - name: 📦 检出代码
+        uses: actions/checkout@v4
+
+      - name: 🐍 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📥 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 🏨 执行签到
+        env:
+          HUAZHU_COOKIE: ${{ secrets.HUAZHU_COOKIE }}
+          PUSH_KEY: ${{ secrets.PUSH_KEY }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: python huazhu_checkin.py
