@@ -29,6 +29,8 @@ import logging
 from datetime import datetime
 from urllib.parse import quote
 
+__version__ = "1.0.1"
+
 try:
     import requests
 except ImportError:
@@ -168,8 +170,16 @@ class HuazhuCheckin:
         try:
             resp = self._request("GET", SIGN_HEADER_URL)
             data = resp.json()
-            code = data.get("code", data.get("businessCode", ""))
-            if str(code) == "200" or str(data.get("businessCode", "")) == "1000":
+            biz_code = str(data.get("businessCode", ""))
+            response_des = data.get("responseDes", "")
+
+            # businessCode 1003 = 未登录 (token过期)
+            if biz_code == "1003" or "未登录" in str(response_des):
+                log_and_notify(f"❌ Token已过期! (businessCode={biz_code}, responseDes={response_des})")
+                log_and_notify(f"   请重新抓包获取新的Cookie/userToken")
+                return {"is_signed": False, "token_expired": True}
+
+            if biz_code == "1000":
                 content = data.get("content", {})
                 if isinstance(content, dict):
                     sign_days = content.get("signDays", content.get("continueDays", "?"))
@@ -181,7 +191,8 @@ class HuazhuCheckin:
                     log_and_notify(f"📋 签到头信息: {data}")
                     return {"is_signed": False}
             else:
-                log_and_notify(f"⚠️ 获取签到状态失败: {data.get('message', data)}")
+                log_and_notify(f"⚠️ 获取签到状态失败: businessCode={biz_code}, msg={data.get('message', '')}, des={response_des}")
+                log_and_notify(f"   完整响应: {json.dumps(data, ensure_ascii=False)[:300]}")
                 return None
         except Exception as e:
             log_and_notify(f"⚠️ 获取签到状态异常: {e}")
@@ -196,15 +207,21 @@ class HuazhuCheckin:
             resp = self._request("GET", SIGN_IN_URL, params=params)
             data = resp.json()
 
-            code = data.get("code", -1)
-            biz_code = data.get("businessCode", "")
-            msg = data.get("message", data.get("responseDes", ""))
+            biz_code = str(data.get("businessCode", ""))
+            response_des = data.get("responseDes", "")
+            msg = data.get("message", "")
             content = data.get("content", {})
 
-            if str(code) == "200" or str(biz_code) == "1000":
-                if isinstance(content, dict):
-                    points_earned = content.get("points", content.get("rewardPoints", ""))
-                    sign_days = content.get("continueDays", content.get("signDays", ""))
+            # businessCode 1003 = 未登录 (token过期)
+            if biz_code == "1003" or "未登录" in str(response_des):
+                log_and_notify(f"❌ 签到失败: Token已过期! (businessCode={biz_code})")
+                log_and_notify(f"   请重新抓包获取新的Cookie/userToken")
+                return False
+
+            if biz_code == "1000":
+                if isinstance(content, dict) and content:
+                    points_earned = content.get("points", content.get("rewardPoints", "?"))
+                    sign_days = content.get("continueDays", content.get("signDays", "?"))
                     log_and_notify(f"✅ 签到成功! 获得 {points_earned} 积分 | 连签: {sign_days}天")
                 else:
                     log_and_notify(f"✅ 签到成功! 返回: {content}")
@@ -213,7 +230,7 @@ class HuazhuCheckin:
                 log_and_notify(f"📌 今日已签到，无需重复签到")
                 return True
             else:
-                log_and_notify(f"❌ 签到失败: code={code}, biz={biz_code}, msg={msg}")
+                log_and_notify(f"❌ 签到失败: businessCode={biz_code}, msg={msg}, des={response_des}")
                 log_and_notify(f"   完整响应: {json.dumps(data, ensure_ascii=False)[:300]}")
                 return False
 
@@ -237,6 +254,10 @@ class HuazhuCheckin:
 
         # 1. 获取签到状态
         sign_info = self.get_sign_header()
+
+        # Token过期则直接返回失败
+        if sign_info and sign_info.get("token_expired"):
+            return False
 
         # 如果已签到则跳过
         if sign_info and sign_info.get("is_signed"):
@@ -271,7 +292,7 @@ def main():
     log_and_notify(f"⏰ 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     # 从环境变量获取Cookie
-    cookie_str = os.environ.get("HUAZHU_COOKIE", "")
+    cookie_str = os.environ.get("HUAZHU_COOKIE", "填写__tea_cache_tokens_10000004={xxxx}")
 
     if not cookie_str:
         log_and_notify("❌ 未配置 HUAZHU_COOKIE 环境变量!")
