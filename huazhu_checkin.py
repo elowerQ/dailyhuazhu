@@ -29,7 +29,7 @@ import logging
 from datetime import datetime
 from urllib.parse import quote
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 try:
     import requests
@@ -165,6 +165,23 @@ class HuazhuCheckin:
                     raise
         return None
 
+    @staticmethod
+    def _extract_field(data, field_names, default="?"):
+        """从字典中尝试多个可能的字段名提取值，支持递归搜索嵌套字典"""
+        if not isinstance(data, dict):
+            return default
+        # 先直接查找顶层字段
+        for name in field_names:
+            if name in data and data[name] is not None:
+                return data[name]
+        # 递归搜索嵌套字典（只搜索一层嵌套）
+        for key, val in data.items():
+            if isinstance(val, dict):
+                for name in field_names:
+                    if name in val and val[name] is not None:
+                        return val[name]
+        return default
+
     def get_sign_header(self):
         """获取签到头部信息 (签到状态)"""
         try:
@@ -182,13 +199,15 @@ class HuazhuCheckin:
             if biz_code == "1000":
                 content = data.get("content", {})
                 if isinstance(content, dict):
-                    sign_days = content.get("signDays", content.get("continueDays", "?"))
-                    is_signed = content.get("isTodaySigned", content.get("isSign", False))
-                    points = content.get("points", content.get("totalPoints", "?"))
-                    log_and_notify(f"📋 签到状态: {'已签到' if is_signed else '未签到'} | 连签: {sign_days}天 | 积分: {points}")
+                    # 使用华住API实际字段名
+                    sign_days = content.get("againSignInDays", "?")
+                    is_signed = content.get("signToday", False)
+                    today_point = content.get("point", "?")
+                    member_point = content.get("memberPoint", "?")
+                    log_and_notify(f"📋 签到状态: {'已签到' if is_signed else '未签到'} | 再签{sign_days}天得奖励 | 今日积分: {today_point} | 总积分: {member_point}")
                     return {"is_signed": is_signed, "sign_days": sign_days}
                 else:
-                    log_and_notify(f"📋 签到头信息: {data}")
+                    log_and_notify(f"📋 签到头信息(非dict): {data}")
                     return {"is_signed": False}
             else:
                 log_and_notify(f"⚠️ 获取签到状态失败: businessCode={biz_code}, msg={data.get('message', '')}, des={response_des}")
@@ -220,9 +239,14 @@ class HuazhuCheckin:
 
             if biz_code == "1000":
                 if isinstance(content, dict) and content:
-                    points_earned = content.get("points", content.get("rewardPoints", "?"))
-                    sign_days = content.get("continueDays", content.get("signDays", "?"))
-                    log_and_notify(f"✅ 签到成功! 获得 {points_earned} 积分 | 连签: {sign_days}天")
+                    # 使用华住API实际字段名
+                    points_earned = content.get("point", content.get("addPoints", "?"))
+                    sign_days = content.get("againSignInDays", content.get("continueDays", "?"))
+                    member_point = content.get("memberPoint", "")
+                    msg_parts = [f"✅ 签到成功! 获得 {points_earned} 积分 | 再签{sign_days}天得奖励"]
+                    if member_point:
+                        msg_parts.append(f" | 总积分: {member_point}")
+                    log_and_notify("".join(msg_parts))
                 else:
                     log_and_notify(f"✅ 签到成功! 返回: {content}")
                 return True
@@ -292,7 +316,7 @@ def main():
     log_and_notify(f"⏰ 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     # 从环境变量获取Cookie
-    cookie_str = os.environ.get("HUAZHU_COOKIE", "填写__tea_cache_tokens_10000004={xxxx}")
+    cookie_str = os.environ.get("HUAZHU_COOKIE", "填写__tea_cache_tokens_10000004={XXXXX}")
 
     if not cookie_str:
         log_and_notify("❌ 未配置 HUAZHU_COOKIE 环境变量!")
