@@ -7,8 +7,8 @@
 - ✅ 每日自动签到，获取积分
 - ✅ 多账号支持
 - ✅ 签到前检测，避免重复签到
-- ✅ 随机延迟，模拟人工操作
-- ✅ 失败自动重试 (最多3次)
+- ✅ 启动随机延迟 (默认随机等 1~30 分钟，防风控)
+- ✅ 被限制 (HTTP 429) 时自动延迟重试
 - ✅ 多种推送通知 (Server酱 / Telegram / Bark / PushPlus)
 - ✅ 支持 GitHub Actions 定时运行
 - ✅ 支持 青龙面板 运行
@@ -40,14 +40,17 @@
    
    进入仓库 → `Settings` → `Secrets and variables` → `Actions` → `New repository secret`
 
-   | Secret 名称 | 说明 | 必填 |
-   |---|---|---|
-   | `HUAZHU_COOKIE` | 华住会Cookie，多账号用 `&` 分隔 | ✅ |
-   | `PUSH_KEY` | Server酱推送Key | ❌ |
-   | `TG_BOT_TOKEN` | Telegram Bot Token | ❌ |
-   | `TG_CHAT_ID` | Telegram Chat ID | ❌ |
-   | `BARK_KEY` | Bark推送Key | ❌ |
-   | `PUSHPLUS_TOKEN` | PushPlus推送Token | ❌ |
+| Secret 名称 | 说明 | 必填 |
+|---|---|---|
+| `HUAZHU_COOKIE` | 华住会Cookie，多账号用 `&` 分隔 | ✅ |
+| `HUAZHU_RANDOM_DELAY` | 启动随机延迟最大分钟数，默认 30；设 0 关闭 | ❌ |
+| `HUAZHU_RETRY_COUNT` | 被限制 (429) 时自动重试次数，默认 2；设 0 关闭 | ❌ |
+| `HUAZHU_RETRY_DELAY_MIN` | 每次重试间隔分钟数，默认 15 | ❌ |
+| `PUSH_KEY` | Server酱推送Key | ❌ |
+| `TG_BOT_TOKEN` | Telegram Bot Token | ❌ |
+| `TG_CHAT_ID` | Telegram Chat ID | ❌ |
+| `BARK_KEY` | Bark推送Key | ❌ |
+| `PUSHPLUS_TOKEN` | PushPlus推送Token | ❌ |
 
 3. **启用 Actions**
    
@@ -81,10 +84,13 @@
 
    进入「环境变量」，添加：
 
-   | 名称 | 值 |
-   |---|---|
-   | `HUAZHU_COOKIE` | 你的华住会Cookie |
-   | `PUSH_KEY` | Server酱Key (可选) |
+   | 名称 | 值 | 必填 |
+   |---|---|---|
+   | `HUAZHU_COOKIE` | 你的华住会Cookie | ✅ |
+   | `HUAZHU_RANDOM_DELAY` | 随机延迟最大分钟数，默认 30 | ❌ |
+   | `HUAZHU_RETRY_COUNT` | 被限制时重试次数，默认 2 | ❌ |
+   | `HUAZHU_RETRY_DELAY_MIN` | 每次重试间隔分钟数，默认 15 | ❌ |
+   | `PUSH_KEY` | Server酱Key | ❌ |
 
    > 多账号在同一个变量中用 `&` 或换行分隔
 
@@ -96,6 +102,8 @@
    命令: task huazhu_checkin.py
    定时规则: 5 8 * * *
    ```
+
+   > ⏱️ **注意超时设置**：开启随机延迟 + 重试后，最坏情况耗时约 65 分钟（随机延迟 30 分钟 + 重试 2×15 分钟）。请将青龙任务的「超时」设置为 **70 分钟以上**，否则任务会被中途杀掉。也可通过环境变量调小延迟/重试参数。
 
 ---
 
@@ -142,7 +150,7 @@ cookie1内容&cookie2内容&cookie3内容
 ## 📁 项目结构
 
 ```
-hzh/
+dailyhuazhu/
 ├── huazhu_checkin.py          # 主签到脚本
 ├── requirements.txt           # Python依赖
 ├── README.md                  # 说明文档
@@ -164,6 +172,10 @@ hzh/
 ---
 
 ## 📝 更新日志
+
+### v1.1.0 (2026-09-05)
+- 🛡️ 新增启动随机延迟：定时任务触发后随机等待 1~30 分钟再签到，避免每天固定时刻签到被风控识别（可通过 `HUAZHU_RANDOM_DELAY` 配置，设 0 关闭）
+- 🔁 新增被限制自动重试：签到遇到 HTTP 429 / businessCode 99999（账号被限制）时，自动延迟 15 分钟重试，最多 2 次（可通过 `HUAZHU_RETRY_COUNT`、`HUAZHU_RETRY_DELAY_MIN` 配置）
 
 ### v1.0.2 (2026-03-20)
 - 🐛 修复签到信息返回"?"的BUG：根据API实际返回字段，修正展示信息为准确的“再签X天得奖励”及积分信息。

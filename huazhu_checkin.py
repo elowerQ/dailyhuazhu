@@ -7,6 +7,9 @@ Cron: 0 8 * * *  (每天早上8点执行)
 
 环境变量:
   HUAZHU_COOKIE: 华住会Cookie，多账号用 & 或换行分隔
+  HUAZHU_RANDOM_DELAY: 启动随机延迟的最大分钟数，默认30 (随机等1~30分钟再签到，防风控; 设0关闭)
+  HUAZHU_RETRY_COUNT: 被限制(429)时的自动重试次数，默认2 (设0关闭)
+  HUAZHU_RETRY_DELAY_MIN: 每次重试的间隔分钟数，默认15
   PUSH_KEY:      Server酱推送Key (可选)
   TG_BOT_TOKEN:  Telegram Bot Token (可选)
   TG_CHAT_ID:    Telegram Chat ID (可选)
@@ -29,7 +32,7 @@ import logging
 from datetime import datetime
 from urllib.parse import quote
 
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 try:
     import requests
@@ -85,6 +88,32 @@ def log_and_notify(msg):
     """记录日志并收集通知消息"""
     logger.info(msg)
     notify_messages.append(msg)
+
+
+# ============================================================
+# 启动随机延迟 (V1.1.0 防风控)
+# ============================================================
+def random_startup_delay():
+    """
+    启动时随机延迟，避免每天固定时刻签到被风控识别。
+
+    环境变量 HUAZHU_RANDOM_DELAY:
+      - 最大延迟分钟数, 默认 30 (即随机等待 1~30 分钟)
+      - 设为 0 可关闭随机延迟
+    """
+    try:
+        max_minutes = int(os.environ.get("HUAZHU_RANDOM_DELAY", "30"))
+    except ValueError:
+        max_minutes = 30
+
+    if max_minutes <= 0:
+        logger.info("⏭️ 随机延迟已关闭 (HUAZHU_RANDOM_DELAY=0)")
+        return
+
+    delay_seconds = random.randint(60, max_minutes * 60)
+    logger.info(f"⏳ 随机延迟 {delay_seconds // 60} 分 {delay_seconds % 60} 秒后开始签到 "
+                f"(避开固定时间签到, 防风控)")
+    time.sleep(delay_seconds)
 
 
 # ============================================================
@@ -200,12 +229,12 @@ class HuazhuCheckin:
                 content = data.get("content", {})
                 if isinstance(content, dict):
                     # 使用华住API实际字段名
-                    sign_days = content.get("againSignInDays", "?")
+                    signed_days = content.get("continueDays", content.get("signedDays", content.get("totalSignDays", "?")))
                     is_signed = content.get("signToday", False)
                     today_point = content.get("point", "?")
                     member_point = content.get("memberPoint", "?")
-                    log_and_notify(f"📋 签到状态: {'已签到' if is_signed else '未签到'} | 再签{sign_days}天得奖励 | 今日积分: {today_point} | 总积分: {member_point}")
-                    return {"is_signed": is_signed, "sign_days": sign_days}
+                    log_and_notify(f"📋 签到状态: {'已签到' if is_signed else '未签到'} | 已签到{signed_days}天 | 今日积分: {today_point} | 总积分: {member_point}")
+                    return {"is_signed": is_signed, "sign_days": signed_days}
                 else:
                     log_and_notify(f"📋 签到头信息(非dict): {data}")
                     return {"is_signed": False}
@@ -218,49 +247,77 @@ class HuazhuCheckin:
             return None
 
     def do_checkin(self):
-        """执行签到 - GET /game/sign_in?date={timestamp}"""
+        """执行签到 - GET /game/sign_in?date={timestamp}
+        V1.1.0: 遇到 429/99999 被限制时自动延迟重试
+        """
+        # 重试配置: HUAZHU_RETRY_COUNT (默认2次), HUAZHU_RETRY_DELAY_MIN (每次重试间隔分钟数, 默认15)
         try:
-            timestamp = int(time.time())
-            params = {"date": str(timestamp)}
+            max_retries = int(os.environ.get("HUAZHU_RETRY_COUNT", "2"))
+        except ValueError:
+            max_retries = 2
+        try:
+            retry_delay_min = int(os.environ.get("HUAZHU_RETRY_DELAY_MIN", "15"))
+        except ValueError:
+            retry_delay_min = 15
 
-            resp = self._request("GET", SIGN_IN_URL, params=params)
-            data = resp.json()
+        for attempt in range(max_retries + 1):
+            try:
+                timestamp = int(time.time())
+                params = {"date": str(timestamp)}
 
-            biz_code = str(data.get("businessCode", ""))
-            response_des = data.get("responseDes", "")
-            msg = data.get("message", "")
-            content = data.get("content", {})
+                resp = self._request("GET", SIGN_IN_URL, params=params)
+                data = resp.json()
 
-            # businessCode 1003 = 未登录 (token过期)
-            if biz_code == "1003" or "未登录" in str(response_des):
-                log_and_notify(f"❌ 签到失败: Token已过期! (businessCode={biz_code})")
-                log_and_notify(f"   请重新抓包获取新的Cookie/userToken")
-                return False
+                biz_code = str(data.get("businessCode", ""))
+                response_des = data.get("responseDes", "")
+                msg = data.get("message", "")
+                content = data.get("content", {})
 
-            if biz_code == "1000":
-                if isinstance(content, dict) and content:
-                    # 使用华住API实际字段名
-                    points_earned = content.get("point", content.get("addPoints", "?"))
-                    sign_days = content.get("againSignInDays", content.get("continueDays", "?"))
-                    member_point = content.get("memberPoint", "")
-                    msg_parts = [f"✅ 签到成功! 获得 {points_earned} 积分 | 再签{sign_days}天得奖励"]
-                    if member_point:
-                        msg_parts.append(f" | 总积分: {member_point}")
-                    log_and_notify("".join(msg_parts))
+                # businessCode 1003 = 未登录 (token过期)
+                if biz_code == "1003" or "未登录" in str(response_des):
+                    log_and_notify(f"❌ 签到失败: Token已过期! (businessCode={biz_code})")
+                    log_and_notify(f"   请重新抓包获取新的Cookie/userToken")
+                    return False
+
+                # V1.1.0: 429/99999 = 账号被限制, 延迟重试
+                if (resp.status_code == 429 or biz_code == "99999"
+                        or "restricted" in str(msg).lower() or "restricted" in str(response_des).lower()):
+                    if attempt < max_retries:
+                        wait_min = retry_delay_min
+                        log_and_notify(f"🚫 账号被限制 (429/99999), {wait_min} 分钟后自动重试 "
+                                       f"({attempt + 1}/{max_retries})...")
+                        time.sleep(wait_min * 60)
+                        continue
+                    else:
+                        log_and_notify(f"❌ 签到失败: 账号被限制, 已重试 {max_retries} 次仍失败")
+                        log_and_notify(f"   完整响应: {json.dumps(data, ensure_ascii=False)[:300]}")
+                        return False
+
+                if biz_code == "1000":
+                    if isinstance(content, dict) and content:
+                        # 使用华住API实际字段名
+                        points_earned = content.get("point", content.get("addPoints", "?"))
+                        signed_days = content.get("continueDays", content.get("signedDays", content.get("totalSignDays", "?")))
+                        member_point = content.get("memberPoint", "")
+                        msg_parts = [f"✅ 签到成功! 获得 {points_earned} 积分 | 已签到{signed_days}天"]
+                        if member_point:
+                            msg_parts.append(f" | 总积分: {member_point}")
+                        log_and_notify("".join(msg_parts))
+                    else:
+                        log_and_notify(f"✅ 签到成功! 返回: {content}")
+                    return True
+                elif "已签" in str(msg) or "already" in str(msg).lower() or "signed" in str(msg).lower():
+                    log_and_notify(f"📌 今日已签到，无需重复签到")
+                    return True
                 else:
-                    log_and_notify(f"✅ 签到成功! 返回: {content}")
-                return True
-            elif "已签" in str(msg) or "already" in str(msg).lower() or "signed" in str(msg).lower():
-                log_and_notify(f"📌 今日已签到，无需重复签到")
-                return True
-            else:
-                log_and_notify(f"❌ 签到失败: businessCode={biz_code}, msg={msg}, des={response_des}")
-                log_and_notify(f"   完整响应: {json.dumps(data, ensure_ascii=False)[:300]}")
-                return False
+                    log_and_notify(f"❌ 签到失败: businessCode={biz_code}, msg={msg}, des={response_des}")
+                    log_and_notify(f"   完整响应: {json.dumps(data, ensure_ascii=False)[:300]}")
+                    return False
 
-        except Exception as e:
-            log_and_notify(f"❌ 签到异常: {e}")
-            return False
+            except Exception as e:
+                log_and_notify(f"❌ 签到异常: {e}")
+                return False
+        return False
 
     def run(self):
         """运行签到流程"""
@@ -314,6 +371,9 @@ def main():
 
     log_and_notify("🏨 华住会自动签到程序启动")
     log_and_notify(f"⏰ 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+    # V1.1.0: 启动随机延迟, 避开固定时间签到 (防风控)
+    random_startup_delay()
 
     # 从环境变量获取Cookie
     cookie_str = os.environ.get("HUAZHU_COOKIE", "填写__tea_cache_tokens_10000004={XXXXX}")

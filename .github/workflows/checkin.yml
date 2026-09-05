@@ -28,6 +28,9 @@ jobs:
       - name: 🏨 执行签到
         env:
           HUAZHU_COOKIE: ${{ secrets.HUAZHU_COOKIE }}
+          HUAZHU_RANDOM_DELAY: ${{ secrets.HUAZHU_RANDOM_DELAY }}
+          HUAZHU_RETRY_COUNT: ${{ secrets.HUAZHU_RETRY_COUNT }}
+          HUAZHU_RETRY_DELAY_MIN: ${{ secrets.HUAZHU_RETRY_DELAY_MIN }}
           PUSH_KEY: ${{ secrets.PUSH_KEY }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
